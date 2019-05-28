@@ -1,0 +1,2113 @@
+diff --git a/Makefile b/Makefile
+index 945b5e3..83fcf94 100644
+--- a/Makefile
++++ b/Makefile
+@@ -5,28 +5,7 @@
+ include config.mk
+ 
+ REQ = util
+-COM =\
+-	components/battery\
+-	components/cpu\
+-	components/datetime\
+-	components/disk\
+-	components/entropy\
+-	components/hostname\
+-	components/ip\
+-	components/kernel_release\
+-	components/keyboard_indicators\
+-	components/keymap\
+-	components/load_avg\
+-	components/netspeeds\
+-	components/num_files\
+-	components/ram\
+-	components/run_command\
+-	components/swap\
+-	components/temperature\
+-	components/uptime\
+-	components/user\
+-	components/volume\
+-	components/wifi
++COM = components/run_command
+ 
+ all: slstatus
+ 
+diff --git a/components/battery.c b/components/battery.c
+deleted file mode 100644
+index 07b6ac1..0000000
+--- a/components/battery.c
++++ /dev/null
+@@ -1,251 +0,0 @@
+-/* See LICENSE file for copyright and license details. */
+-#include <stdio.h>
+-#include <string.h>
+-
+-#include "../util.h"
+-
+-#if defined(__linux__)
+-	#include <limits.h>
+-	#include <stdint.h>
+-	#include <unistd.h>
+-
+-	static const char *
+-	pick(const char *bat, const char *f1, const char *f2, char *path,
+-	     size_t length)
+-	{
+-		if (esnprintf(path, length, f1, bat) > 0 &&
+-		    access(path, R_OK) == 0) {
+-			return f1;
+-		}
+-
+-		if (esnprintf(path, length, f2, bat) > 0 &&
+-		    access(path, R_OK) == 0) {
+-			return f2;
+-		}
+-
+-		return NULL;
+-	}
+-
+-	const char *
+-	battery_perc(const char *bat)
+-	{
+-		int perc;
+-		char path[PATH_MAX];
+-
+-		if (esnprintf(path, sizeof(path),
+-		              "/sys/class/power_supply/%s/capacity", bat) < 0) {
+-			return NULL;
+-		}
+-		if (pscanf(path, "%d", &perc) != 1) {
+-			return NULL;
+-		}
+-
+-		return bprintf("%d", perc);
+-	}
+-
+-	const char *
+-	battery_state(const char *bat)
+-	{
+-		static struct {
+-			char *state;
+-			char *symbol;
+-		} map[] = {
+-			{ "Charging",    "+" },
+-			{ "Discharging", "-" },
+-		};
+-		size_t i;
+-		char path[PATH_MAX], state[12];
+-
+-		if (esnprintf(path, sizeof(path),
+-		              "/sys/class/power_supply/%s/status", bat) < 0) {
+-			return NULL;
+-		}
+-		if (pscanf(path, "%12s", state) != 1) {
+-			return NULL;
+-		}
+-
+-		for (i = 0; i < LEN(map); i++) {
+-			if (!strcmp(map[i].state, state)) {
+-				break;
+-			}
+-		}
+-		return (i == LEN(map)) ? "?" : map[i].symbol;
+-	}
+-
+-	const char *
+-	battery_remaining(const char *bat)
+-	{
+-		uintmax_t charge_now, current_now, m, h;
+-		double timeleft;
+-		char path[PATH_MAX], state[12];
+-
+-		if (esnprintf(path, sizeof(path),
+-		              "/sys/class/power_supply/%s/status", bat) < 0) {
+-			return NULL;
+-		}
+-		if (pscanf(path, "%12s", state) != 1) {
+-			return NULL;
+-		}
+-
+-		if (!pick(bat, "/sys/class/power_supply/%s/charge_now",
+-		          "/sys/class/power_supply/%s/energy_now", path,
+-		          sizeof(path)) ||
+-		    pscanf(path, "%ju", &charge_now) < 0) {
+-			return NULL;
+-		}
+-
+-		if (!strcmp(state, "Discharging")) {
+-			if (!pick(bat, "/sys/class/power_supply/%s/current_now",
+-			          "/sys/class/power_supply/%s/power_now", path,
+-			          sizeof(path)) ||
+-			    pscanf(path, "%ju", &current_now) < 0) {
+-				return NULL;
+-			}
+-
+-			if (current_now == 0) {
+-				return NULL;
+-			}
+-
+-			timeleft = (double)charge_now / (double)current_now;
+-			h = timeleft;
+-			m = (timeleft - (double)h) * 60;
+-
+-			return bprintf("%juh %jum", h, m);
+-		}
+-
+-		return "";
+-	}
+-#elif defined(__OpenBSD__)
+-	#include <fcntl.h>
+-	#include <machine/apmvar.h>
+-	#include <sys/ioctl.h>
+-	#include <unistd.h>
+-
+-	static int
+-	load_apm_power_info(struct apm_power_info *apm_info)
+-	{
+-		int fd;
+-
+-		fd = open("/dev/apm", O_RDONLY);
+-		if (fd < 0) {
+-			warn("open '/dev/apm':");
+-			return 0;
+-		}
+-
+-		memset(apm_info, 0, sizeof(struct apm_power_info));
+-		if (ioctl(fd, APM_IOC_GETPOWER, apm_info) < 0) {
+-			warn("ioctl 'APM_IOC_GETPOWER':");
+-			close(fd);
+-			return 0;
+-		}
+-		return close(fd), 1;
+-	}
+-
+-	const char *
+-	battery_perc(const char *unused)
+-	{
+-		struct apm_power_info apm_info;
+-
+-		if (load_apm_power_info(&apm_info)) {
+-			return bprintf("%d", apm_info.battery_life);
+-		}
+-
+-		return NULL;
+-	}
+-
+-	const char *
+-	battery_state(const char *unused)
+-	{
+-		struct {
+-			unsigned int state;
+-			char *symbol;
+-		} map[] = {
+-			{ APM_AC_ON,      "+" },
+-			{ APM_AC_OFF,     "-" },
+-		};
+-		struct apm_power_info apm_info;
+-		size_t i;
+-
+-		if (load_apm_power_info(&apm_info)) {
+-			for (i = 0; i < LEN(map); i++) {
+-				if (map[i].state == apm_info.ac_state) {
+-					break;
+-				}
+-			}
+-			return (i == LEN(map)) ? "?" : map[i].symbol;
+-		}
+-
+-		return NULL;
+-	}
+-
+-	const char *
+-	battery_remaining(const char *unused)
+-	{
+-		struct apm_power_info apm_info;
+-
+-		if (load_apm_power_info(&apm_info)) {
+-			if (apm_info.ac_state != APM_AC_ON) {
+-				return bprintf("%uh %02um",
+-			                       apm_info.minutes_left / 60,
+-				               apm_info.minutes_left % 60);
+-			} else {
+-				return "";
+-			}
+-		}
+-
+-		return NULL;
+-	}
+-#elif defined(__FreeBSD__)
+-	#include <sys/sysctl.h>
+-
+-	const char *
+-	battery_perc(const char *unused)
+-	{
+-		int cap;
+-		size_t len;
+-
+-		len = sizeof(cap);
+-		if (sysctlbyname("hw.acpi.battery.life", &cap, &len, NULL, 0) == -1
+-				|| !len)
+-			return NULL;
+-
+-		return bprintf("%d", cap);
+-	}
+-
+-	const char *
+-	battery_state(const char *unused)
+-	{
+-		int state;
+-		size_t len;
+-
+-		len = sizeof(state);
+-		if (sysctlbyname("hw.acpi.battery.state", &state, &len, NULL, 0) == -1
+-				|| !len)
+-			return NULL;
+-
+-		switch(state) {
+-			case 0:
+-			case 2:
+-				return "+";
+-			case 1:
+-				return "-";
+-			default:
+-				return "?";
+-		}
+-	}
+-
+-	const char *
+-	battery_remaining(const char *unused)
+-	{
+-		int rem;
+-		size_t len;
+-
+-		len = sizeof(rem);
+-		if (sysctlbyname("hw.acpi.battery.time", &rem, &len, NULL, 0) == -1
+-				|| !len
+-				|| rem == -1)
+-			return NULL;
+-
+-		return bprintf("%uh %02um", rem / 60, rem % 60);
+-	}
+-#endif
+diff --git a/components/cpu.c b/components/cpu.c
+deleted file mode 100644
+index 9e28003..0000000
+--- a/components/cpu.c
++++ /dev/null
+@@ -1,164 +0,0 @@
+-/* See LICENSE file for copyright and license details. */
+-#include <stdint.h>
+-#include <stdio.h>
+-#include <string.h>
+-
+-#include "../util.h"
+-
+-#if defined(__linux__)
+-	const char *
+-	cpu_freq(void)
+-	{
+-		uintmax_t freq;
+-
+-		/* in kHz */
+-		if (pscanf("/sys/devices/system/cpu/cpu0/cpufreq/"
+-		           "scaling_cur_freq", "%ju", &freq) != 1) {
+-			return NULL;
+-		}
+-
+-		return fmt_human(freq * 1000, 1000);
+-	}
+-
+-	const char *
+-	cpu_perc(void)
+-	{
+-		static long double a[7];
+-		long double b[7], sum;
+-
+-		memcpy(b, a, sizeof(b));
+-		/* cpu user nice system idle iowait irq softirq */
+-		if (pscanf("/proc/stat", "%*s %Lf %Lf %Lf %Lf %Lf %Lf %Lf",
+-		           &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6])
+-		    != 7) {
+-			return NULL;
+-		}
+-		if (b[0] == 0) {
+-			return NULL;
+-		}
+-
+-		sum = (b[0] + b[1] + b[2] + b[3] + b[4] + b[5] + b[6]) -
+-		      (a[0] + a[1] + a[2] + a[3] + a[4] + a[5] + a[6]);
+-
+-		if (sum == 0) {
+-			return NULL;
+-		}
+-
+-		return bprintf("%d", (int)(100 *
+-		               ((b[0] + b[1] + b[2] + b[5] + b[6]) -
+-		                (a[0] + a[1] + a[2] + a[5] + a[6])) / sum));
+-	}
+-#elif defined(__OpenBSD__)
+-	#include <sys/param.h>
+-	#include <sys/sched.h>
+-	#include <sys/sysctl.h>
+-
+-	const char *
+-	cpu_freq(void)
+-	{
+-		int freq, mib[2];
+-		size_t size;
+-
+-		mib[0] = CTL_HW;
+-		mib[1] = HW_CPUSPEED;
+-
+-		size = sizeof(freq);
+-
+-		/* in MHz */
+-		if (sysctl(mib, 2, &freq, &size, NULL, 0) < 0) {
+-			warn("sysctl 'HW_CPUSPEED':");
+-			return NULL;
+-		}
+-
+-		return fmt_human(freq * 1E6, 1000);
+-	}
+-
+-	const char *
+-	cpu_perc(void)
+-	{
+-		int mib[2];
+-		static uintmax_t a[CPUSTATES];
+-		uintmax_t b[CPUSTATES], sum;
+-		size_t size;
+-
+-		mib[0] = CTL_KERN;
+-		mib[1] = KERN_CPTIME;
+-
+-		size = sizeof(a);
+-
+-		memcpy(b, a, sizeof(b));
+-		if (sysctl(mib, 2, &a, &size, NULL, 0) < 0) {
+-			warn("sysctl 'KERN_CPTIME':");
+-			return NULL;
+-		}
+-		if (b[0] == 0) {
+-			return NULL;
+-		}
+-
+-		sum = (a[CP_USER] + a[CP_NICE] + a[CP_SYS] + a[CP_INTR] + a[CP_IDLE]) -
+-		      (b[CP_USER] + b[CP_NICE] + b[CP_SYS] + b[CP_INTR] + b[CP_IDLE]);
+-
+-		if (sum == 0) {
+-			return NULL;
+-		}
+-
+-		return bprintf("%d", 100 *
+-		               ((a[CP_USER] + a[CP_NICE] + a[CP_SYS] +
+-		                 a[CP_INTR]) -
+-		                (b[CP_USER] + b[CP_NICE] + b[CP_SYS] +
+-		                 b[CP_INTR])) / sum);
+-	}
+-#elif defined(__FreeBSD__)
+-	#include <sys/param.h>
+-	#include <sys/sysctl.h>
+-	#include <devstat.h>
+-
+-	const char *
+-	cpu_freq(void)
+-	{
+-		int freq;
+-		size_t size;
+-
+-		size = sizeof(freq);
+-		/* in MHz */
+-		if (sysctlbyname("hw.clockrate", &freq, &size, NULL, 0) == -1
+-				|| !size) {
+-			warn("sysctlbyname 'hw.clockrate':");
+-			return NULL;
+-		}
+-
+-		return fmt_human(freq * 1E6, 1000);
+-	}
+-
+-	const char *
+-	cpu_perc(void)
+-	{
+-		size_t size;
+-		static long a[CPUSTATES];
+-		long b[CPUSTATES], sum;
+-
+-		size = sizeof(a);
+-		memcpy(b, a, sizeof(b));
+-		if (sysctlbyname("kern.cp_time", &a, &size, NULL, 0) == -1
+-				|| !size) {
+-			warn("sysctlbyname 'kern.cp_time':");
+-			return NULL;
+-		}
+-		if (b[0] == 0) {
+-			return NULL;
+-		}
+-
+-		sum = (a[CP_USER] + a[CP_NICE] + a[CP_SYS] + a[CP_INTR] + a[CP_IDLE]) -
+-		      (b[CP_USER] + b[CP_NICE] + b[CP_SYS] + b[CP_INTR] + b[CP_IDLE]);
+-
+-		if (sum == 0) {
+-			return NULL;
+-		}
+-
+-		return bprintf("%d", 100 *
+-		               ((a[CP_USER] + a[CP_NICE] + a[CP_SYS] +
+-		                 a[CP_INTR]) -
+-		                (b[CP_USER] + b[CP_NICE] + b[CP_SYS] +
+-		                 b[CP_INTR])) / sum);
+-	}
+-#endif
+diff --git a/components/datetime.c b/components/datetime.c
+deleted file mode 100644
+index c3efae3..0000000
+--- a/components/datetime.c
++++ /dev/null
+@@ -1,19 +0,0 @@
+-/* See LICENSE file for copyright and license details. */
+-#include <stdio.h>
+-#include <time.h>
+-
+-#include "../util.h"
+-
+-const char *
+-datetime(const char *fmt)
+-{
+-	time_t t;
+-
+-	t = time(NULL);
+-	if (!strftime(buf, sizeof(buf), fmt, localtime(&t))) {
+-		warn("strftime: Result string exceeds buffer size");
+-		return NULL;
+-	}
+-
+-	return buf;
+-}
+diff --git a/components/disk.c b/components/disk.c
+deleted file mode 100644
+index 15a221b..0000000
+--- a/components/disk.c
++++ /dev/null
+@@ -1,58 +0,0 @@
+-/* See LICENSE file for copyright and license details. */
+-#include <stdio.h>
+-#include <sys/statvfs.h>
+-
+-#include "../util.h"
+-
+-const char *
+-disk_free(const char *path)
+-{
+-	struct statvfs fs;
+-
+-	if (statvfs(path, &fs) < 0) {
+-		warn("statvfs '%s':", path);
+-		return NULL;
+-	}
+-
+-	return fmt_human(fs.f_frsize * fs.f_bavail, 1024);
+-}
+-
+-const char *
+-disk_perc(const char *path)
+-{
+-	struct statvfs fs;
+-
+-	if (statvfs(path, &fs) < 0) {
+-		warn("statvfs '%s':", path);
+-		return NULL;
+-	}
+-
+-	return bprintf("%d", (int)(100 *
+-	               (1.0f - ((float)fs.f_bavail / (float)fs.f_blocks))));
+-}
+-
+-const char *
+-disk_total(const char *path)
+-{
+-	struct statvfs fs;
+-
+-	if (statvfs(path, &fs) < 0) {
+-		warn("statvfs '%s':", path);
+-		return NULL;
+-	}
+-
+-	return fmt_human(fs.f_frsize * fs.f_blocks, 1024);
+-}
+-
+-const char *
+-disk_used(const char *path)
+-{
+-	struct statvfs fs;
+-
+-	if (statvfs(path, &fs) < 0) {
+-		warn("statvfs '%s':", path);
+-		return NULL;
+-	}
+-
+-	return fmt_human(fs.f_frsize * (fs.f_blocks - fs.f_bfree), 1024);
+-}
+diff --git a/components/entropy.c b/components/entropy.c
+deleted file mode 100644
+index 2a485de..0000000
+--- a/components/entropy.c
++++ /dev/null
+@@ -1,27 +0,0 @@
+-/* See LICENSE file for copyright and license details. */
+-#if defined(__linux__)
+-	#include <stdint.h>
+-	#include <stdio.h>
+-
+-	#include "../util.h"
+-
+-	const char *
+-	entropy(void)
+-	{
+-		uintmax_t num;
+-
+-		if (pscanf("/proc/sys/kernel/random/entropy_avail", "%ju", &num)
+-		    != 1) {
+-			return NULL;
+-		}
+-
+-		return bprintf("%ju", num);
+-	}
+-#elif defined(__OpenBSD__) | defined(__FreeBSD__)
+-	const char *
+-	entropy(void)
+-	{
+-		/* Unicode Character 'INFINITY' (U+221E) */
+-		return "\xe2\x88\x9e";
+-	}
+-#endif
+diff --git a/components/hostname.c b/components/hostname.c
+deleted file mode 100644
+index 23da677..0000000
+--- a/components/hostname.c
++++ /dev/null
+@@ -1,16 +0,0 @@
+-/* See LICENSE file for copyright and license details. */
+-#include <stdio.h>
+-#include <unistd.h>
+-
+-#include "../util.h"
+-
+-const char *
+-hostname(void)
+-{
+-	if (gethostname(buf, sizeof(buf)) < 0) {
+-		warn("gethostbyname:");
+-		return NULL;
+-	}
+-
+-	return buf;
+-}
+diff --git a/components/ip.c b/components/ip.c
+deleted file mode 100644
+index 70724eb..0000000
+--- a/components/ip.c
++++ /dev/null
+@@ -1,60 +0,0 @@
+-/* See LICENSE file for copyright and license details. */
+-#include <ifaddrs.h>
+-#include <netdb.h>
+-#include <stdio.h>
+-#include <string.h>
+-#if defined(__OpenBSD__)
+-	#include <sys/types.h>
+-	#include <sys/socket.h>
+-#elif defined(__FreeBSD__)
+-	#include <netinet/in.h>
+-	#include <sys/socket.h>
+-#endif
+-
+-#include "../util.h"
+-
+-static const char *
+-ip(const char *interface, unsigned short sa_family)
+-{
+-	struct ifaddrs *ifaddr, *ifa;
+-	int s;
+-	char host[NI_MAXHOST];
+-
+-	if (getifaddrs(&ifaddr) < 0) {
+-		warn("getifaddrs:");
+-		return NULL;
+-	}
+-
+-	for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+-		if (!ifa->ifa_addr) {
+-			continue;
+-		}
+-		s = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in6),
+-		                host, NI_MAXHOST, NULL, 0, NI_NUMERICHOST);
+-		if (!strcmp(ifa->ifa_name, interface) &&
+-		    (ifa->ifa_addr->sa_family == sa_family)) {
+-			freeifaddrs(ifaddr);
+-			if (s != 0) {
+-				warn("getnameinfo: %s", gai_strerror(s));
+-				return NULL;
+-			}
+-			return bprintf("%s", host);
+-		}
+-	}
+-
+-	freeifaddrs(ifaddr);
+-
+-	return NULL;
+-}
+-
+-const char *
+-ipv4(const char *interface)
+-{
+-	return ip(interface, AF_INET);
+-}
+-
+-const char *
+-ipv6(const char *interface)
+-{
+-	return ip(interface, AF_INET6);
+-}
+diff --git a/components/kernel_release.c b/components/kernel_release.c
+deleted file mode 100644
+index 0457301..0000000
+--- a/components/kernel_release.c
++++ /dev/null
+@@ -1,18 +0,0 @@
+-/* See LICENSE file for copyright and license details. */
+-#include <sys/utsname.h>
+-#include <stdio.h>
+-
+-#include "../util.h"
+-
+-const char *
+-kernel_release(void)
+-{
+-	struct utsname udata;
+-
+-	if (uname(&udata) < 0) {
+-		warn("uname:");
+-		return NULL;
+-	}
+-
+-	return bprintf("%s", udata.release);
+-}
+diff --git a/components/keyboard_indicators.c b/components/keyboard_indicators.c
+deleted file mode 100644
+index b35eba1..0000000
+--- a/components/keyboard_indicators.c
++++ /dev/null
+@@ -1,48 +0,0 @@
+-/* See LICENSE file for copyright and license details. */
+-#include <ctype.h>
+-#include <stdio.h>
+-#include <string.h>
+-#include <X11/Xlib.h>
+-
+-#include "../util.h"
+-
+-/*
+- * fmt consists of uppercase or lowercase 'c' for caps lock and/or 'n' for num
+- * lock, each optionally followed by '?', in the order of indicators desired.
+- * If followed by '?', the letter with case preserved is included in the output
+- * if the corresponding indicator is on.  Otherwise, the letter is always
+- * included, lowercase when off and uppercase when on.
+- */
+-const char *
+-keyboard_indicators(const char *fmt)
+-{
+-	Display *dpy;
+-	XKeyboardState state;
+-	size_t fmtlen, i, n;
+-	int togglecase, isset;
+-	char key;
+-
+-	if (!(dpy = XOpenDisplay(NULL))) {
+-		warn("XOpenDisplay: Failed to open display");
+-		return NULL;
+-	}
+-	XGetKeyboardControl(dpy, &state);
+-	XCloseDisplay(dpy);
+-
+-	fmtlen = strnlen(fmt, 4);
+-	for (i = n = 0; i < fmtlen; i++) {
+-		key = tolower(fmt[i]);
+-		if (key != 'c' && key != 'n') {
+-			continue;
+-		}
+-		togglecase = (i + 1 >= fmtlen || fmt[i + 1] != '?');
+-		isset = (state.led_mask & (1 << (key == 'n')));
+-		if (togglecase) {
+-			buf[n++] = isset ? toupper(key) : key;
+-		} else if (isset) {
+-			buf[n++] = fmt[i];
+-		}
+-	}
+-	buf[n] = 0;
+-	return buf;
+-}
+diff --git a/components/keymap.c b/components/keymap.c
+deleted file mode 100644
+index ddf7a15..0000000
+--- a/components/keymap.c
++++ /dev/null
+@@ -1,87 +0,0 @@
+-/* See LICENSE file for copyright and license details. */
+-#include <ctype.h>
+-#include <stdlib.h>
+-#include <string.h>
+-#include <X11/XKBlib.h>
+-#include <X11/Xlib.h>
+-
+-#include "../util.h"
+-
+-static int
+-valid_layout_or_variant(char *sym)
+-{
+-	size_t i;
+-	/* invalid symbols from xkb rules config */
+-	static const char *invalid[] = { "evdev", "inet", "pc", "base" };
+-
+-	for (i = 0; i < LEN(invalid); i++) {
+-		if (!strncmp(sym, invalid[i], strlen(invalid[i]))) {
+-			return 0;
+-		}
+-	}
+-
+-	return 1;
+-}
+-
+-static char *
+-get_layout(char *syms, int grp_num)
+-{
+-	char *tok, *layout;
+-	int grp;
+-
+-	layout = NULL;
+-	tok = strtok(syms, "+:");
+-	for (grp = 0; tok && grp <= grp_num; tok = strtok(NULL, "+:")) {
+-		if (!valid_layout_or_variant(tok)) {
+-			continue;
+-		} else if (strlen(tok) == 1 && isdigit(tok[0])) {
+-			/* ignore :2, :3, :4 (additional layout groups) */
+-			continue;
+-		}
+-		layout = tok;
+-		grp++;
+-	}
+-
+-	return layout;
+-}
+-
+-const char *
+-keymap(void)
+-{
+-	Display *dpy;
+-	XkbDescRec *desc;
+-	XkbStateRec state;
+-	char *symbols, *layout;
+-
+-	layout = NULL;
+-
+-	if (!(dpy = XOpenDisplay(NULL))) {
+-		warn("XOpenDisplay: Failed to open display");
+-		return NULL;
+-	}
+-	if (!(desc = XkbAllocKeyboard())) {
+-		warn("XkbAllocKeyboard: Failed to allocate keyboard");
+-		goto end;
+-	}
+-	if (XkbGetNames(dpy, XkbSymbolsNameMask, desc)) {
+-		warn("XkbGetNames: Failed to retrieve key symbols");
+-		goto end;
+-	}
+-	if (XkbGetState(dpy, XkbUseCoreKbd, &state)) {
+-		warn("XkbGetState: Failed to retrieve keyboard state");
+-		goto end;
+-	}
+-	if (!(symbols = XGetAtomName(dpy, desc->names->symbols))) {
+-		warn("XGetAtomName: Failed to get atom name");
+-		goto end;
+-	}
+-	layout = (char *)bprintf("%s", get_layout(symbols, state.group));
+-	XFree(symbols);
+-end:
+-	XkbFreeKeyboard(desc, XkbSymbolsNameMask, 1);
+-	if (XCloseDisplay(dpy)) {
+-		warn("XCloseDisplay: Failed to close display");
+-	}
+-
+-	return layout;
+-}
+diff --git a/components/load_avg.c b/components/load_avg.c
+deleted file mode 100644
+index 5c2e252..0000000
+--- a/components/load_avg.c
++++ /dev/null
+@@ -1,18 +0,0 @@
+-/* See LICENSE file for copyright and license details. */
+-#include <stdio.h>
+-#include <stdlib.h>
+-
+-#include "../util.h"
+-
+-const char *
+-load_avg(void)
+-{
+-	double avgs[3];
+-
+-	if (getloadavg(avgs, 3) < 0) {
+-		warn("getloadavg: Failed to obtain load average");
+-		return NULL;
+-	}
+-
+-	return bprintf("%.2f %.2f %.2f", avgs[0], avgs[1], avgs[2]);
+-}
+diff --git a/components/netspeeds.c b/components/netspeeds.c
+deleted file mode 100644
+index 0029177..0000000
+--- a/components/netspeeds.c
++++ /dev/null
+@@ -1,139 +0,0 @@
+-/* See LICENSE file for copyright and license details. */
+-#include <stdio.h>
+-#include <limits.h>
+-
+-#include "../util.h"
+-
+-#if defined(__linux__)
+-	#include <stdint.h>
+-
+-	const char *
+-	netspeed_rx(const char *interface)
+-	{
+-		uintmax_t oldrxbytes;
+-		static uintmax_t rxbytes;
+-		extern const unsigned int interval;
+-		char path[PATH_MAX];
+-
+-		oldrxbytes = rxbytes;
+-
+-		if (esnprintf(path, sizeof(path),
+-		              "/sys/class/net/%s/statistics/rx_bytes",
+-		              interface) < 0) {
+-			return NULL;
+-		}
+-		if (pscanf(path, "%ju", &rxbytes) != 1) {
+-			return NULL;
+-		}
+-		if (oldrxbytes == 0) {
+-			return NULL;
+-		}
+-
+-		return fmt_human((rxbytes - oldrxbytes) * 1000 / interval,
+-		                 1024);
+-	}
+-
+-	const char *
+-	netspeed_tx(const char *interface)
+-	{
+-		uintmax_t oldtxbytes;
+-		static uintmax_t txbytes;
+-		extern const unsigned int interval;
+-		char path[PATH_MAX];
+-
+-		oldtxbytes = txbytes;
+-
+-		if (esnprintf(path, sizeof(path),
+-		              "/sys/class/net/%s/statistics/tx_bytes",
+-		              interface) < 0) {
+-			return NULL;
+-		}
+-		if (pscanf(path, "%ju", &txbytes) != 1) {
+-			return NULL;
+-		}
+-		if (oldtxbytes == 0) {
+-			return NULL;
+-		}
+-
+-		return fmt_human((txbytes - oldtxbytes) * 1000 / interval,
+-		                 1024);
+-	}
+-#elif defined(__OpenBSD__) | defined(__FreeBSD__)
+-	#include <string.h>
+-	#include <ifaddrs.h>
+-	#include <sys/types.h>
+-	#include <sys/socket.h>
+-	#include <net/if.h>
+-
+-	const char *
+-	netspeed_rx(const char *interface)
+-	{
+-		struct ifaddrs *ifal, *ifa;
+-		struct if_data *ifd;
+-		uintmax_t oldrxbytes;
+-		static uintmax_t rxbytes;
+-		extern const unsigned int interval;
+-		int if_ok = 0;
+-
+-		oldrxbytes = rxbytes;
+-
+-		if (getifaddrs(&ifal) == -1) {
+-			warn("getifaddrs failed");
+-			return NULL;
+-		}
+-		rxbytes = 0;
+-		for (ifa = ifal; ifa; ifa = ifa->ifa_next) {
+-			if (!strcmp(ifa->ifa_name, interface) &&
+-			   (ifd = (struct if_data *)ifa->ifa_data)) {
+-				rxbytes += ifd->ifi_ibytes, if_ok = 1;
+-			}
+-		}
+-		freeifaddrs(ifal);
+-		if (!if_ok) {
+-			warn("reading 'if_data' failed");
+-			return NULL;
+-		}
+-		if (oldrxbytes == 0) {
+-			return NULL;
+-		}
+-
+-		return fmt_human((rxbytes - oldrxbytes) * 1000 / interval,
+-		                 1024);
+-	}
+-
+-	const char *
+-	netspeed_tx(const char *interface)
+-	{
+-		struct ifaddrs *ifal, *ifa;
+-		struct if_data *ifd;
+-		uintmax_t oldtxbytes;
+-		static uintmax_t txbytes;
+-		extern const unsigned int interval;
+-		int if_ok = 0;
+-
+-		oldtxbytes = txbytes;
+-
+-		if (getifaddrs(&ifal) == -1) {
+-			warn("getifaddrs failed");
+-			return NULL;
+-		}
+-		txbytes = 0;
+-		for (ifa = ifal; ifa; ifa = ifa->ifa_next) {
+-			if (!strcmp(ifa->ifa_name, interface) &&
+-			   (ifd = (struct if_data *)ifa->ifa_data)) {
+-				txbytes += ifd->ifi_obytes, if_ok = 1;
+-			}
+-		}
+-		freeifaddrs(ifal);
+-		if (!if_ok) {
+-			warn("reading 'if_data' failed");
+-			return NULL;
+-		}
+-		if (oldtxbytes == 0) {
+-			return NULL;
+-		}
+-
+-		return fmt_human((txbytes - oldtxbytes) * 1000 / interval,
+-		                 1024);
+-	}
+-#endif
+diff --git a/components/num_files.c b/components/num_files.c
+deleted file mode 100644
+index fb55df9..0000000
+--- a/components/num_files.c
++++ /dev/null
+@@ -1,31 +0,0 @@
+-/* See LICENSE file for copyright and license details. */
+-#include <dirent.h>
+-#include <stdio.h>
+-#include <string.h>
+-
+-#include "../util.h"
+-
+-const char *
+-num_files(const char *path)
+-{
+-	struct dirent *dp;
+-	DIR *fd;
+-	int num;
+-
+-	if (!(fd = opendir(path))) {
+-		warn("opendir '%s':", path);
+-		return NULL;
+-	}
+-
+-	num = 0;
+-	while ((dp = readdir(fd))) {
+-		if (!strcmp(dp->d_name, ".") || !strcmp(dp->d_name, "..")) {
+-			continue; /* skip self and parent */
+-		}
+-		num++;
+-	}
+-
+-	closedir(fd);
+-
+-	return bprintf("%d", num);
+-}
+diff --git a/components/ram.c b/components/ram.c
+deleted file mode 100644
+index 47e6fda..0000000
+--- a/components/ram.c
++++ /dev/null
+@@ -1,222 +0,0 @@
+-/* See LICENSE file for copyright and license details. */
+-#include <stdio.h>
+-
+-#include "../util.h"
+-
+-#if defined(__linux__)
+-	#include <stdint.h>
+-
+-	const char *
+-	ram_free(void)
+-	{
+-		uintmax_t free;
+-
+-		if (pscanf("/proc/meminfo",
+-		           "MemTotal: %ju kB\n"
+-		           "MemFree: %ju kB\n"
+-		           "MemAvailable: %ju kB\n",
+-		           &free, &free, &free) != 3) {
+-			return NULL;
+-		}
+-
+-		return fmt_human(free * 1024, 1024);
+-	}
+-
+-	const char *
+-	ram_perc(void)
+-	{
+-		uintmax_t total, free, buffers, cached;
+-
+-		if (pscanf("/proc/meminfo",
+-		           "MemTotal: %ju kB\n"
+-		           "MemFree: %ju kB\n"
+-		           "MemAvailable: %ju kB\n"
+-		           "Buffers: %ju kB\n"
+-		           "Cached: %ju kB\n",
+-		           &total, &free, &buffers, &buffers, &cached) != 5) {
+-			return NULL;
+-		}
+-
+-		if (total == 0) {
+-			return NULL;
+-		}
+-
+-		return bprintf("%d", 100 * ((total - free) - (buffers + cached))
+-                               / total);
+-	}
+-
+-	const char *
+-	ram_total(void)
+-	{
+-		uintmax_t total;
+-
+-		if (pscanf("/proc/meminfo", "MemTotal: %ju kB\n", &total)
+-		    != 1) {
+-			return NULL;
+-		}
+-
+-		return fmt_human(total * 1024, 1024);
+-	}
+-
+-	const char *
+-	ram_used(void)
+-	{
+-		uintmax_t total, free, buffers, cached;
+-
+-		if (pscanf("/proc/meminfo",
+-		           "MemTotal: %ju kB\n"
+-		           "MemFree: %ju kB\n"
+-		           "MemAvailable: %ju kB\n"
+-		           "Buffers: %ju kB\n"
+-		           "Cached: %ju kB\n",
+-		           &total, &free, &buffers, &buffers, &cached) != 5) {
+-			return NULL;
+-		}
+-
+-		return fmt_human((total - free - buffers - cached) * 1024,
+-		                 1024);
+-	}
+-#elif defined(__OpenBSD__)
+-	#include <stdlib.h>
+-	#include <sys/sysctl.h>
+-	#include <sys/types.h>
+-	#include <unistd.h>
+-
+-	#define LOG1024 10
+-	#define pagetok(size, pageshift) (size_t)(size << (pageshift - LOG1024))
+-
+-	inline int
+-	load_uvmexp(struct uvmexp *uvmexp)
+-	{
+-		int uvmexp_mib[] = {CTL_VM, VM_UVMEXP};
+-		size_t size;
+-
+-		size = sizeof(*uvmexp);
+-
+-		if (sysctl(uvmexp_mib, 2, uvmexp, &size, NULL, 0) >= 0) {
+-			return 1;
+-		}
+-
+-		return 0;
+-	}
+-
+-	const char *
+-	ram_free(void)
+-	{
+-		struct uvmexp uvmexp;
+-		int free_pages;
+-
+-		if (load_uvmexp(&uvmexp)) {
+-			free_pages = uvmexp.npages - uvmexp.active;
+-			return fmt_human(pagetok(free_pages, uvmexp.pageshift) *
+-			                 1024, 1024);
+-		}
+-
+-		return NULL;
+-	}
+-
+-	const char *
+-	ram_perc(void)
+-	{
+-		struct uvmexp uvmexp;
+-		int percent;
+-
+-		if (load_uvmexp(&uvmexp)) {
+-			percent = uvmexp.active * 100 / uvmexp.npages;
+-			return bprintf("%d", percent);
+-		}
+-
+-		return NULL;
+-	}
+-
+-	const char *
+-	ram_total(void)
+-	{
+-		struct uvmexp uvmexp;
+-
+-		if (load_uvmexp(&uvmexp)) {
+-			return fmt_human(pagetok(uvmexp.npages,
+-			                         uvmexp.pageshift) * 1024,
+-			                 1024);
+-		}
+-
+-		return NULL;
+-	}
+-
+-	const char *
+-	ram_used(void)
+-	{
+-		struct uvmexp uvmexp;
+-
+-		if (load_uvmexp(&uvmexp)) {
+-			return fmt_human(pagetok(uvmexp.active,
+-			                         uvmexp.pageshift) * 1024,
+-			                 1024);
+-		}
+-
+-		return NULL;
+-	}
+-#elif defined(__FreeBSD__)
+-	#include <sys/sysctl.h>
+-	#include <sys/vmmeter.h>
+-	#include <unistd.h>
+-	#include <vm/vm_param.h>
+-
+-	const char *
+-	ram_free(void) {
+-		struct vmtotal vm_stats;
+-		int mib[] = {CTL_VM, VM_TOTAL};
+-		size_t len;
+-
+-		len = sizeof(struct vmtotal);
+-		if (sysctl(mib, 2, &vm_stats, &len, NULL, 0) == -1
+-				|| !len)
+-			return NULL;
+-
+-		return fmt_human(vm_stats.t_free * getpagesize(), 1024);
+-	}
+-
+-	const char *
+-	ram_total(void) {
+-		long npages;
+-		size_t len;
+-
+-		len = sizeof(npages);
+-		if (sysctlbyname("vm.stats.vm.v_page_count", &npages, &len, NULL, 0) == -1
+-				|| !len)
+-			return NULL;
+-
+-		return fmt_human(npages * getpagesize(), 1024);
+-	}
+-
+-	const char *
+-	ram_perc(void) {
+-		long npages;
+-		long active;
+-		size_t len;
+-
+-		len = sizeof(npages);
+-		if (sysctlbyname("vm.stats.vm.v_page_count", &npages, &len, NULL, 0) == -1
+-				|| !len)
+-			return NULL;
+-
+-		if (sysctlbyname("vm.stats.vm.v_active_count", &active, &len, NULL, 0) == -1
+-				|| !len)
+-			return NULL;
+-
+-		return bprintf("%d", active * 100 / npages);
+-	}
+-
+-	const char *
+-	ram_used(void) {
+-		long active;
+-		size_t len;
+-
+-		len = sizeof(active);
+-		if (sysctlbyname("vm.stats.vm.v_active_count", &active, &len, NULL, 0) == -1
+-				|| !len)
+-			return NULL;
+-
+-		return fmt_human(active * getpagesize(), 1024);
+-	}
+-#endif
+diff --git a/components/swap.c b/components/swap.c
+deleted file mode 100644
+index 2509db1..0000000
+--- a/components/swap.c
++++ /dev/null
+@@ -1,284 +0,0 @@
+-/* See LICENSE file for copyright and license details. */
+-#include <stdint.h>
+-#include <stdio.h>
+-#include <stdlib.h>
+-#include <string.h>
+-
+-#include "../util.h"
+-
+-#if defined(__linux__)
+-	static int
+-	get_swap_info(long *s_total, long *s_free, long *s_cached)
+-	{
+-		FILE *fp;
+-		struct {
+-			const char *name;
+-			const size_t len;
+-			long *var;
+-		} ent[] = {
+-			{ "SwapTotal",  sizeof("SwapTotal") - 1,  s_total  },
+-			{ "SwapFree",   sizeof("SwapFree") - 1,   s_free   },
+-			{ "SwapCached", sizeof("SwapCached") - 1, s_cached },
+-		};
+-		size_t line_len = 0, i, left;
+-		char *line = NULL;
+-
+-		/* get number of fields we want to extract */
+-		for (i = 0, left = 0; i < LEN(ent); i++) {
+-			if (ent[i].var) {
+-				left++;
+-			}
+-		}
+-
+-		if (!(fp = fopen("/proc/meminfo", "r"))) {
+-			warn("fopen '/proc/meminfo':");
+-			return 1;
+-		}
+-
+-		/* read file line by line and extract field information */
+-		while (left > 0 && getline(&line, &line_len, fp) >= 0) {
+-			for (i = 0; i < LEN(ent); i++) {
+-				if (ent[i].var &&
+-				    !strncmp(line, ent[i].name, ent[i].len)) {
+-					sscanf(line + ent[i].len + 1,
+-					       "%ld kB\n", ent[i].var);
+-					left--;
+-					break;
+-				}
+-			}
+-		}
+-		free(line);
+-		if (ferror(fp)) {
+-			warn("getline '/proc/meminfo':");
+-			return 1;
+-		}
+-
+-		fclose(fp);
+-		return 0;
+-	}
+-
+-	const char *
+-	swap_free(void)
+-	{
+-		long free;
+-
+-		if (get_swap_info(NULL, &free, NULL)) {
+-			return NULL;
+-		}
+-
+-		return fmt_human(free * 1024, 1024);
+-	}
+-
+-	const char *
+-	swap_perc(void)
+-	{
+-		long total, free, cached;
+-
+-		if (get_swap_info(&total, &free, &cached) || total == 0) {
+-			return NULL;
+-		}
+-
+-		return bprintf("%d", 100 * (total - free - cached) / total);
+-	}
+-
+-	const char *
+-	swap_total(void)
+-	{
+-		long total;
+-
+-		if (get_swap_info(&total, NULL, NULL)) {
+-			return NULL;
+-		}
+-
+-		return fmt_human(total * 1024, 1024);
+-	}
+-
+-	const char *
+-	swap_used(void)
+-	{
+-		long total, free, cached;
+-
+-		if (get_swap_info(&total, &free, &cached)) {
+-			return NULL;
+-		}
+-
+-		return fmt_human((total - free - cached) * 1024, 1024);
+-	}
+-#elif defined(__OpenBSD__)
+-	#include <stdlib.h>
+-	#include <sys/swap.h>
+-	#include <sys/types.h>
+-	#include <unistd.h>
+-
+-	static int
+-	getstats(int *total, int *used)
+-	{
+-		struct swapent *sep, *fsep;
+-		int rnswap, nswap, i;
+-
+-		if ((nswap = swapctl(SWAP_NSWAP, 0, 0)) < 1) {
+-			warn("swaptctl 'SWAP_NSWAP':");
+-			return 1;
+-		}
+-		if (!(fsep = sep = calloc(nswap, sizeof(*sep)))) {
+-			warn("calloc 'nswap':");
+-			return 1;
+-		}
+-		if ((rnswap = swapctl(SWAP_STATS, (void *)sep, nswap)) < 0) {
+-			warn("swapctl 'SWAP_STATA':");
+-			return 1;
+-		}
+-		if (nswap != rnswap) {
+-			warn("getstats: SWAP_STATS != SWAP_NSWAP");
+-			return 1;
+-		}
+-
+-		*total = 0;
+-		*used = 0;
+-
+-		for (i = 0; i < rnswap; i++) {
+-			*total += sep->se_nblks >> 1;
+-			*used += sep->se_inuse >> 1;
+-		}
+-
+-		free(fsep);
+-
+-		return 0;
+-	}
+-
+-	const char *
+-	swap_free(void)
+-	{
+-		int total, used;
+-
+-		if (getstats(&total, &used)) {
+-			return NULL;
+-		}
+-
+-		return fmt_human((total - used) * 1024, 1024);
+-	}
+-
+-	const char *
+-	swap_perc(void)
+-	{
+-		int total, used;
+-
+-		if (getstats(&total, &used)) {
+-			return NULL;
+-		}
+-
+-		if (total == 0) {
+-			return NULL;
+-		}
+-
+-		return bprintf("%d", 100 * used / total);
+-	}
+-
+-	const char *
+-	swap_total(void)
+-	{
+-		int total, used;
+-
+-		if (getstats(&total, &used)) {
+-			return NULL;
+-		}
+-
+-		return fmt_human(total * 1024, 1024);
+-	}
+-
+-	const char *
+-	swap_used(void)
+-	{
+-		int total, used;
+-
+-		if (getstats(&total, &used)) {
+-			return NULL;
+-		}
+-
+-		return fmt_human(used * 1024, 1024);
+-	}
+-#elif defined(__FreeBSD__)
+-	#include <stdlib.h>
+-	#include <sys/types.h>
+-	#include <fcntl.h>
+-	#include <unistd.h>
+-	#include <kvm.h>
+-
+-	static int getswapinfo(struct kvm_swap *swap_info, size_t size)
+-	{
+-		kvm_t *kd;
+-
+-		kd = kvm_openfiles(NULL, "/dev/null", NULL, 0, NULL);
+-		if(kd == NULL) {
+-			warn("kvm_openfiles '/dev/null':");
+-			return 0;
+-		}
+-
+-		if(kvm_getswapinfo(kd, swap_info, size, 0 /* Unused flags */) == -1) {
+-			warn("kvm_getswapinfo:");
+-			kvm_close(kd);
+-			return 0;
+-		}
+-
+-		kvm_close(kd);
+-		return 1;
+-	}
+-
+-	const char *
+-	swap_free(void)
+-	{
+-		struct kvm_swap swap_info[1];
+-		long used, total;
+-
+-		if(!getswapinfo(swap_info, 1))
+-			return NULL;
+-
+-		total = swap_info[0].ksw_total;
+-		used = swap_info[0].ksw_used;
+-
+-		return fmt_human((total - used) * getpagesize(), 1024);
+-	}
+-
+-	const char *
+-	swap_perc(void)
+-	{
+-		struct kvm_swap swap_info[1];
+-		long used, total;
+-
+-		if(!getswapinfo(swap_info, 1))
+-			return NULL;
+-
+-		total = swap_info[0].ksw_total;
+-		used = swap_info[0].ksw_used;
+-
+-		return bprintf("%d", used * 100 / total);
+-	}
+-
+-	const char *
+-	swap_total(void)
+-	{
+-		struct kvm_swap swap_info[1];
+-		long total;
+-
+-		if(!getswapinfo(swap_info, 1))
+-			return NULL;
+-
+-		total = swap_info[0].ksw_total;
+-
+-		return fmt_human(total * getpagesize(), 1024);
+-	}
+-
+-	const char *
+-	swap_used(void)
+-	{
+-		struct kvm_swap swap_info[1];
+-		long used;
+-
+-		if(!getswapinfo(swap_info, 1))
+-			return NULL;
+-
+-		used = swap_info[0].ksw_used;
+-
+-		return fmt_human(used * getpagesize(), 1024);
+-	}
+-#endif
+diff --git a/components/temperature.c b/components/temperature.c
+deleted file mode 100644
+index 8462d0f..0000000
+--- a/components/temperature.c
++++ /dev/null
+@@ -1,71 +0,0 @@
+-/* See LICENSE file for copyright and license details. */
+-#include <stddef.h>
+-
+-#include "../util.h"
+-
+-
+-#if defined(__linux__)
+-	#include <stdint.h>
+-
+-	const char *
+-	temp(const char *file)
+-	{
+-		uintmax_t temp;
+-
+-		if (pscanf(file, "%ju", &temp) != 1) {
+-			return NULL;
+-		}
+-
+-		return bprintf("%ju", temp / 1000);
+-	}
+-#elif defined(__OpenBSD__)
+-	#include <stdio.h>
+-	#include <sys/time.h> /* before <sys/sensors.h> for struct timeval */
+-	#include <sys/sensors.h>
+-	#include <sys/sysctl.h>
+-
+-	const char *
+-	temp(const char *unused)
+-	{
+-		int mib[5];
+-		size_t size;
+-		struct sensor temp;
+-
+-		mib[0] = CTL_HW;
+-		mib[1] = HW_SENSORS;
+-		mib[2] = 0; /* cpu0 */
+-		mib[3] = SENSOR_TEMP;
+-		mib[4] = 0; /* temp0 */
+-
+-		size = sizeof(temp);
+-
+-		if (sysctl(mib, 5, &temp, &size, NULL, 0) < 0) {
+-			warn("sysctl 'SENSOR_TEMP':");
+-			return NULL;
+-		}
+-
+-		/* kelvin to celsius */
+-		return bprintf("%d", (temp.value - 273150000) / 1E6);
+-	}
+-#elif defined(__FreeBSD__)
+-	#include <stdio.h>
+-	#include <stdlib.h>
+-	#include <sys/sysctl.h>
+-
+-	const char *
+-	temp(const char *zone)
+-	{
+-		char buf[256];
+-		int temp;
+-		size_t len;
+-
+-		len = sizeof(temp);
+-		snprintf(buf, sizeof(buf), "hw.acpi.thermal.%s.temperature", zone);
+-		if (sysctlbyname(buf, &temp, &len, NULL, 0) == -1
+-				|| !len)
+-			return NULL;
+-
+-		/* kelvin to decimal celcius */
+-		return bprintf("%d.%d", (temp - 2731) / 10, abs((temp - 2731) % 10));
+-	}
+-#endif
+diff --git a/components/uptime.c b/components/uptime.c
+deleted file mode 100644
+index 7c23c98..0000000
+--- a/components/uptime.c
++++ /dev/null
+@@ -1,33 +0,0 @@
+-/* See LICENSE file for copyright and license details. */
+-#include <stdint.h>
+-#include <stdio.h>
+-#include <time.h>
+-
+-#include "../util.h"
+-
+-#if defined(CLOCK_BOOTTIME)
+-	#define UPTIME_FLAG CLOCK_BOOTTIME
+-#elif defined(CLOCK_UPTIME)
+-	#define UPTIME_FLAG CLOCK_UPTIME
+-#else
+-	#define UPTIME_FLAG CLOCK_MONOTONIC
+-#endif
+-
+-const char *
+-uptime(void)
+-{
+-	char warn_buf[256];
+-	uintmax_t h, m;
+-	struct timespec uptime;
+-
+-	if (clock_gettime(UPTIME_FLAG, &uptime) < 0) {
+-		snprintf(warn_buf, 256, "clock_gettime %d", UPTIME_FLAG);
+-		warn(warn_buf);
+-		return NULL;
+-	}
+-
+-	h = uptime.tv_sec / 3600;
+-	m = uptime.tv_sec % 3600 / 60;
+-
+-	return bprintf("%juh %jum", h, m);
+-}
+diff --git a/components/user.c b/components/user.c
+deleted file mode 100644
+index 71a0c9d..0000000
+--- a/components/user.c
++++ /dev/null
+@@ -1,32 +0,0 @@
+-/* See LICENSE file for copyright and license details. */
+-#include <pwd.h>
+-#include <stdio.h>
+-#include <sys/types.h>
+-#include <unistd.h>
+-
+-#include "../util.h"
+-
+-const char *
+-gid(void)
+-{
+-	return bprintf("%d", getgid());
+-}
+-
+-const char *
+-username(void)
+-{
+-	struct passwd *pw;
+-
+-	if (!(pw = getpwuid(geteuid()))) {
+-		warn("getpwuid '%d':", geteuid());
+-		return NULL;
+-	}
+-
+-	return bprintf("%s", pw->pw_name);
+-}
+-
+-const char *
+-uid(void)
+-{
+-	return bprintf("%d", geteuid());
+-}
+diff --git a/components/volume.c b/components/volume.c
+deleted file mode 100644
+index 61cec90..0000000
+--- a/components/volume.c
++++ /dev/null
+@@ -1,109 +0,0 @@
+-/* See LICENSE file for copyright and license details. */
+-#include <fcntl.h>
+-#include <stdio.h>
+-#include <string.h>
+-#include <sys/ioctl.h>
+-#include <unistd.h>
+-
+-#include "../util.h"
+-
+-#if defined(__OpenBSD__)
+-	#include <sys/audioio.h>
+-
+-	const char *
+-	vol_perc(const char *card)
+-	{
+-		static int cls = -1;
+-		mixer_devinfo_t mdi;
+-		mixer_ctrl_t mc;
+-		int afd = -1, m = -1, v = -1;
+-
+-		if ((afd = open(card, O_RDONLY)) < 0) {
+-			warn("open '%s':", card);
+-			return NULL;
+-		}
+-
+-		for (mdi.index = 0; cls == -1; mdi.index++) {
+-			if (ioctl(afd, AUDIO_MIXER_DEVINFO, &mdi) < 0) {
+-				warn("ioctl 'AUDIO_MIXER_DEVINFO':");
+-				close(afd);
+-				return NULL;
+-			}
+-			if (mdi.type == AUDIO_MIXER_CLASS &&
+-			    !strncmp(mdi.label.name,
+-				     AudioCoutputs,
+-				     MAX_AUDIO_DEV_LEN))
+-				cls = mdi.index;
+-			}
+-		for (mdi.index = 0; v == -1 || m == -1; mdi.index++) {
+-			if (ioctl(afd, AUDIO_MIXER_DEVINFO, &mdi) < 0) {
+-				warn("ioctl 'AUDIO_MIXER_DEVINFO':");
+-				close(afd);
+-				return NULL;
+-			}
+-			if (mdi.mixer_class == cls &&
+-			    ((mdi.type == AUDIO_MIXER_VALUE &&
+-			      !strncmp(mdi.label.name,
+-				       AudioNmaster,
+-				       MAX_AUDIO_DEV_LEN)) ||
+-			     (mdi.type == AUDIO_MIXER_ENUM &&
+-			      !strncmp(mdi.label.name,
+-				      AudioNmute,
+-				      MAX_AUDIO_DEV_LEN)))) {
+-				mc.dev = mdi.index, mc.type = mdi.type;
+-				if (ioctl(afd, AUDIO_MIXER_READ, &mc) < 0) {
+-					warn("ioctl 'AUDIO_MIXER_READ':");
+-					close(afd);
+-					return NULL;
+-				}
+-				if (mc.type == AUDIO_MIXER_VALUE)
+-					v = mc.un.value.num_channels == 1 ?
+-					    mc.un.value.level[AUDIO_MIXER_LEVEL_MONO] :
+-					    (mc.un.value.level[AUDIO_MIXER_LEVEL_LEFT] >
+-					     mc.un.value.level[AUDIO_MIXER_LEVEL_RIGHT] ?
+-					     mc.un.value.level[AUDIO_MIXER_LEVEL_LEFT] :
+-					     mc.un.value.level[AUDIO_MIXER_LEVEL_RIGHT]);
+-				else if (mc.type == AUDIO_MIXER_ENUM)
+-					m = mc.un.ord;
+-			}
+-		}
+-
+-		close(afd);
+-
+-		return bprintf("%d", m ? 0 : v * 100 / 255);
+-	}
+-#else
+-	#include <sys/soundcard.h>
+-
+-	const char *
+-	vol_perc(const char *card)
+-	{
+-		size_t i;
+-		int v, afd, devmask;
+-		char *vnames[] = SOUND_DEVICE_NAMES;
+-
+-		if ((afd = open(card, O_RDONLY | O_NONBLOCK)) < 0) {
+-			warn("open '%s':", card);
+-			return NULL;
+-		}
+-
+-		if (ioctl(afd, (int)SOUND_MIXER_READ_DEVMASK, &devmask) < 0) {
+-			warn("ioctl 'SOUND_MIXER_READ_DEVMASK':");
+-			close(afd);
+-			return NULL;
+-		}
+-		for (i = 0; i < LEN(vnames); i++) {
+-			if (devmask & (1 << i) && !strcmp("vol", vnames[i])) {
+-				if (ioctl(afd, MIXER_READ(i), &v) < 0) {
+-					warn("ioctl 'MIXER_READ(%ld)':", i);
+-					close(afd);
+-					return NULL;
+-				}
+-			}
+-		}
+-
+-		close(afd);
+-
+-		return bprintf("%d", v & 0xff);
+-	}
+-#endif
+diff --git a/components/wifi.c b/components/wifi.c
+deleted file mode 100644
+index 92c252e..0000000
+--- a/components/wifi.c
++++ /dev/null
+@@ -1,272 +0,0 @@
+-/* See LICENSE file for copyright and license details. */
+-#include <ifaddrs.h>
+-#include <stdio.h>
+-#include <string.h>
+-#include <sys/ioctl.h>
+-#include <sys/socket.h>
+-#include <unistd.h>
+-
+-#include "../util.h"
+-
+-#define RSSI_TO_PERC(rssi) \
+-			rssi >= -50 ? 100 : \
+-			(rssi <= -100 ? 0 : \
+-			(2 * (rssi + 100)))
+-
+-#if defined(__linux__)
+-	#include <limits.h>
+-	#include <linux/wireless.h>
+-
+-	const char *
+-	wifi_perc(const char *interface)
+-	{
+-		int cur;
+-		size_t i;
+-		char *p, *datastart;
+-		char path[PATH_MAX];
+-		char status[5];
+-		FILE *fp;
+-
+-		if (esnprintf(path, sizeof(path), "/sys/class/net/%s/operstate",
+-		              interface) < 0) {
+-			return NULL;
+-		}
+-		if (!(fp = fopen(path, "r"))) {
+-			warn("fopen '%s':", path);
+-			return NULL;
+-		}
+-		p = fgets(status, 5, fp);
+-		fclose(fp);
+-		if (!p || strcmp(status, "up\n") != 0) {
+-			return NULL;
+-		}
+-
+-		if (!(fp = fopen("/proc/net/wireless", "r"))) {
+-			warn("fopen '/proc/net/wireless':");
+-			return NULL;
+-		}
+-
+-		for (i = 0; i < 3; i++) {
+-			if (!(p = fgets(buf, sizeof(buf) - 1, fp)))
+-				break;
+-		}
+-		fclose(fp);
+-		if (i < 2 || !p) {
+-			return NULL;
+-		}
+-
+-		if (!(datastart = strstr(buf, interface))) {
+-			return NULL;
+-		}
+-
+-		datastart = (datastart+(strlen(interface)+1));
+-		sscanf(datastart + 1, " %*d   %d  %*d  %*d\t\t  %*d\t   "
+-		       "%*d\t\t%*d\t\t %*d\t  %*d\t\t %*d", &cur);
+-
+-		/* 70 is the max of /proc/net/wireless */
+-		return bprintf("%d", (int)((float)cur / 70 * 100));
+-	}
+-
+-	const char *
+-	wifi_essid(const char *interface)
+-	{
+-		static char id[IW_ESSID_MAX_SIZE+1];
+-		int sockfd;
+-		struct iwreq wreq;
+-
+-		memset(&wreq, 0, sizeof(struct iwreq));
+-		wreq.u.essid.length = IW_ESSID_MAX_SIZE+1;
+-		if (esnprintf(wreq.ifr_name, sizeof(wreq.ifr_name), "%s",
+-		              interface) < 0) {
+-			return NULL;
+-		}
+-
+-		if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+-			warn("socket 'AF_INET':");
+-			return NULL;
+-		}
+-		wreq.u.essid.pointer = id;
+-		if (ioctl(sockfd,SIOCGIWESSID, &wreq) < 0) {
+-			warn("ioctl 'SIOCGIWESSID':");
+-			close(sockfd);
+-			return NULL;
+-		}
+-
+-		close(sockfd);
+-
+-		if (!strcmp(id, "")) {
+-			return NULL;
+-		}
+-
+-		return id;
+-	}
+-#elif defined(__OpenBSD__)
+-	#include <net/if.h>
+-	#include <net/if_media.h>
+-	#include <net80211/ieee80211.h>
+-	#include <sys/select.h> /* before <sys/ieee80211_ioctl.h> for NBBY */
+-	#include <net80211/ieee80211_ioctl.h>
+-	#include <stdlib.h>
+-	#include <sys/types.h>
+-
+-	static int
+-	load_ieee80211_nodereq(const char *interface, struct ieee80211_nodereq *nr)
+-	{
+-		struct ieee80211_bssid bssid;
+-		int sockfd;
+-		uint8_t zero_bssid[IEEE80211_ADDR_LEN];
+-
+-		memset(&bssid, 0, sizeof(bssid));
+-		memset(nr, 0, sizeof(struct ieee80211_nodereq));
+-		if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+-			warn("socket 'AF_INET':");
+-			return 0;
+-		}
+-		strlcpy(bssid.i_name, interface, sizeof(bssid.i_name));
+-		if ((ioctl(sockfd, SIOCG80211BSSID, &bssid)) < 0) {
+-			warn("ioctl 'SIOCG80211BSSID':");
+-			close(sockfd);
+-			return 0;
+-		}
+-		memset(&zero_bssid, 0, sizeof(zero_bssid));
+-		if (memcmp(bssid.i_bssid, zero_bssid,
+-		    IEEE80211_ADDR_LEN) == 0) {
+-			close(sockfd);
+-			return 0;
+-		}
+-		strlcpy(nr->nr_ifname, interface, sizeof(nr->nr_ifname));
+-		memcpy(&nr->nr_macaddr, bssid.i_bssid, sizeof(nr->nr_macaddr));
+-		if ((ioctl(sockfd, SIOCG80211NODE, nr)) < 0 && nr->nr_rssi) {
+-			warn("ioctl 'SIOCG80211NODE':");
+-			close(sockfd);
+-			return 0;
+-		}
+-
+-		return close(sockfd), 1;
+-	}
+-
+-	const char *
+-	wifi_perc(const char *interface)
+-	{
+-		struct ieee80211_nodereq nr;
+-		int q;
+-
+-		if (load_ieee80211_nodereq(interface, &nr)) {
+-			if (nr.nr_max_rssi) {
+-				q = IEEE80211_NODEREQ_RSSI(&nr);
+-			} else {
+-				q = RSSI_TO_PERC(nr.nr_rssi);
+-			}
+-			return bprintf("%d", q);
+-		}
+-
+-		return NULL;
+-	}
+-
+-	const char *
+-	wifi_essid(const char *interface)
+-	{
+-		struct ieee80211_nodereq nr;
+-
+-		if (load_ieee80211_nodereq(interface, &nr)) {
+-			return bprintf("%s", nr.nr_nwid);
+-		}
+-
+-		return NULL;
+-	}
+-#elif defined(__FreeBSD__)
+-	#include <net/if.h>
+-	#include <net80211/ieee80211_ioctl.h>
+-
+-	int
+-	load_ieee80211req(int sock, const char *interface, void *data, int type, size_t *len)
+-	{
+-		char warn_buf[256];
+-		struct ieee80211req ireq;
+-		memset(&ireq, 0, sizeof(ireq));
+-		ireq.i_type = type;
+-		ireq.i_data = (caddr_t) data;
+-		ireq.i_len = *len;
+-
+-		strlcpy(ireq.i_name, interface, sizeof(ireq.i_name));
+-		if (ioctl(sock, SIOCG80211, &ireq) < 0) {
+-			snprintf(warn_buf,  sizeof(warn_buf),
+-					"ioctl: 'SIOCG80211': %d", type);
+-			warn(warn_buf);
+-			return 0;
+-		}
+-
+-		*len = ireq.i_len;
+-		return 1;
+-	}
+-
+-	const char *
+-	wifi_perc(const char *interface)
+-	{
+-		union {
+-			struct ieee80211req_sta_req sta;
+-			uint8_t buf[24 * 1024];
+-		} info;
+-		uint8_t bssid[IEEE80211_ADDR_LEN];
+-		int rssi_dbm;
+-		int sockfd;
+-		size_t len;
+-		const char *fmt;
+-
+-		if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+-			warn("socket 'AF_INET':");
+-			return NULL;
+-		}
+-
+-		/* Retreive MAC address of interface */
+-		len = IEEE80211_ADDR_LEN;
+-		fmt = NULL;
+-		if (load_ieee80211req(sockfd, interface, &bssid, IEEE80211_IOC_BSSID, &len))
+-		{
+-			/* Retrieve info on station with above BSSID */
+-			memset(&info, 0, sizeof(info));
+-			memcpy(info.sta.is_u.macaddr, bssid, sizeof(bssid));
+-
+-			len = sizeof(info);
+-			if (load_ieee80211req(sockfd, interface, &info, IEEE80211_IOC_STA_INFO, &len)) {
+-				rssi_dbm = info.sta.info[0].isi_noise +
+- 					         info.sta.info[0].isi_rssi / 2;
+-
+-				fmt = bprintf("%d", RSSI_TO_PERC(rssi_dbm));
+-			}
+-		}
+-
+-		close(sockfd);
+-		return fmt;
+-	}
+-
+-	const char *
+-	wifi_essid(const char *interface)
+-	{
+-		char ssid[IEEE80211_NWID_LEN + 1];
+-		size_t len;
+-		int sockfd;
+-		const char *fmt;
+-
+-		if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+-			warn("socket 'AF_INET':");
+-			return NULL;
+-		}
+-
+-		fmt = NULL;
+-		len = sizeof(ssid);
+-		memset(&ssid, 0, len);
+-		if (load_ieee80211req(sockfd, interface, &ssid, IEEE80211_IOC_SSID, &len )) {
+-			if (len < sizeof(ssid))
+-				len += 1;
+-			else
+-				len = sizeof(ssid);
+-
+-			ssid[len - 1] = '\0';
+-			fmt = bprintf("%s", ssid);
+-		}
+-
+-		close(sockfd);
+-		return fmt;
+-	}
+-#endif
