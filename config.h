@@ -63,14 +63,14 @@ static const char unknown_str[] = "";
  */
 static const struct arg args[] = {
 	/* function     format   argument */
-  {  run_command, "%s |",  "bar mediaplayer" },
-  {  run_command, "%s |",  "bar volume"      },
-  {  run_command, "%s |",  "bar memory"      },
-  {  run_command, "%s |",  "bar disk"        },
-  {  run_command, "%s |",  "bar cpu"         },
-  {  run_command, "%s |",  "bar wifi"        },
-  {  run_command, "%s|",   "bar openconnect" },
-  {  run_command, "%s |",  "bar battery"     },
-  {  run_command, "%s |",  "bar datee"       },
-  {  run_command, "%s ",   "bar timee"       },
+  {  run_command, "%s |",  "dwb mediaplayer" },
+  {  run_command, "%s |",  "dwb volume"      },
+  {  run_command, "%s |",  "dwb memory"      },
+  {  run_command, "%s |",  "dwb disk"        },
+  {  run_command, "%s |",  "dwb cpu"         },
+  {  run_command, "%s |",  "dwb wifi"        },
+  {  run_command, "%s|",   "dwb openconnect" },
+  {  run_command, "%s |",  "dwb battery"     },
+  {  run_command, "%s |",  "dwb datee"       },
+  {  run_command, "%s ",   "dwb timee"       },
 };
