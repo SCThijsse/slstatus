@@ -63,6 +63,7 @@ static const char unknown_str[] = "";
  */
 static const struct arg args[] = {
 	/* function     format   argument */
+  {  run_command, "%s |",  "dwb rupdates"    },
   {  run_command, "%s |",  "dwb mediaplayer" },
   {  run_command, "%s |",  "dwb volume"      },
   {  run_command, "%s |",  "dwb memory"      },
