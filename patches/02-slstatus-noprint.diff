@@ -1,0 +1,12 @@
+diff --git a/slstatus.c b/slstatus.c
+index 96fa5b6..0a52109 100644
+--- a/slstatus.c
++++ b/slstatus.c
+@@ -86,6 +86,7 @@ main(int argc, char *argv[])
+ 		for (i = len = 0; i < LEN(args); i++) {
+ 			if (!(res = args[i].func(args[i].args))) {
+ 				res = unknown_str;
++				continue;
+ 			}
+ 			if ((ret = esnprintf(status + len, sizeof(status) - len,
+ 			                    args[i].fmt, res)) < 0) {
